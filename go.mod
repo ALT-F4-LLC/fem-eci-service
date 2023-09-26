@@ -1,3 +1,3 @@
-module github.com/erikreinert/fem-eci-service
+module github.com/ALT-F4-LLC/fem-eci-service
 
-go 1.21.0
+go 1.20
