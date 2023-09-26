@@ -1,0 +1,79 @@
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-push-docker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Check out the repository to the runner
+        uses: actions/checkout@v4  
+      - name: Build and Push Docker Image
+        env:
+          REGISTRY_NAME: "677459762413.dkr.ecr.us-west-2.amazonaws.com"
+          REPOSITORY_NAME: "fem-eci-service"
+          IMAGE_TAG: "prod"
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          aws ecr put-image-tag-mutability --repository-name ${REPOSITORY_NAME} --image-tag-mutability MUTABLE
+          docker build -t ${REGISTRY_NAME}/${REPOSITORY_NAME}:${IMAGE_TAG} .
+          aws ecr get-login-password | docker login --username AWS --password-stdin ${REGISTRY_NAME}
+          docker push ${REGISTRY_NAME}/${REPOSITORY_NAME}:${IMAGE_TAG}
+
+  update-ssm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Check out the repository to the runner
+        uses: actions/checkout@v4  
+      - name: Update AWS SSM from config file
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          ECS_SERVICE_NAME: "service-prod"
+        run: |
+          #!/bin/bash
+          export BRANCH_NAME=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}
+          while read line; do
+              key=$(echo $line | cut -d '=' -f 1)
+              value=$(echo $line | cut -d '=' -f 2-)
+          
+              echo "Updating AWS SSM: ${key}=$value"
+              aws ssm put-parameter --name /${ECS_SERVICE_NAME}/$key --value $value --overwrite --type String
+          done < "configs/${BRANCH_NAME}.conf"
+
+  restart:
+    needs: [build-push-docker, update-ssm]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Redeploy ECS Service
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          ECS_SERVICE_NAME: "service-prod"
+          ECS_CLUSTER_NAME: "fem-eci-test-prod"
+        run: |
+          #!/bin/bash
+          aws ecs describe-task-definition \
+              --task-definition arn:aws:ecs:us-west-2:677459762413:task-definition/${ECS_SERVICE_NAME}
+          aws ecs update-service \
+              --service ${ECS_SERVICE_NAME} \
+              --cluster ${ECS_CLUSTER_NAME} \
+              --force-new-deployment
+          aws ecs wait services-stable \
+              --services ${ECS_SERVICE_NAME} \
+              --cluster ${ECS_CLUSTER_NAME}
